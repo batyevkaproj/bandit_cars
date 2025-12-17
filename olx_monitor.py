@@ -1,230 +1,193 @@
 import requests
+import sqlite3
 import time
 import random
-import sqlite3
-import os
-from datetime import datetime, timezone
+from pathlib import Path
+from datetime import datetime
 
-# ===================== CONFIG =====================
+# =============================
+# CONFIG
+# =============================
+BASE_DIR = Path(__file__).parent.resolve()
+DB_PATH = BASE_DIR / "cars.db"
 
-API_URL = "https://www.olx.ua/api/v1/offers/"
-CATEGORY_ID = 108
+API_URL = "https://www.olx.ua/api/v1/offers"
 
-MAX_PRICE_USD = 2000
-USD_TO_UAH = 40  # грубий курс для фільтра
+MIN_PRICE_UAH = 2000
+MAX_PRICE_UAH = 300000
 
-# --- GEO FILTER ---
-ALLOWED_LOCATIONS = (
-    "київ",
-    "kyiv",
-    "київська",
-    "киев",
-    "kiev"
-)
+SLEEP_MIN = 8 * 60
+SLEEP_MAX = 12 * 60
 
-CHECK_MIN = 8
-CHECK_MAX = 12
-OFFSETS = [0, 50, 100]
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "olx.db")
+KYIV_KEYWORDS = [
+    "київ", "киев", "kyiv",
+    "київська", "киевская",
+    "область", "обл"
+]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json",
-    "Referer": "https://www.olx.ua/",
+    "Accept-Language": "uk-UA,uk;q=0.9,ru-UA;q=0.8,ru;q=0.7",
 }
 
-BASE_PARAMS = {
-    "category_id": CATEGORY_ID,
-    "sort_by": "created_at:desc",
-    "limit": 50,
-}
-
-# ===================== DB =====================
-
+# =============================
+# DB
+# =============================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cars (
             id TEXT PRIMARY KEY,
             title TEXT,
             price_value INTEGER,
             price_currency TEXT,
-            price_uah INTEGER,
             location TEXT,
             image_url TEXT,
             ad_url TEXT,
-            created_at TEXT
+            created_at TEXT,
+            price_uah INTEGER
         )
     """)
-
-    # --- auto migration ---
-    cols = [r[1] for r in cur.execute("PRAGMA table_info(cars)").fetchall()]
-    if "price_uah" not in cols:
-        print("🛠 DB migration: adding column price_uah")
-        cur.execute("ALTER TABLE cars ADD COLUMN price_uah INTEGER")
-
     conn.commit()
-    return conn
+    conn.close()
 
-def save_car(conn, car):
+
+def save_car(car: dict):
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO cars
-        (id, title, price_value, price_currency, price_uah,
-         location, image_url, ad_url, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO cars (
+            id, title, price_value, price_currency,
+            location, image_url, ad_url,
+            created_at, price_uah
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         car["id"],
         car["title"],
         car["price_value"],
         car["price_currency"],
-        car["price_uah"],
         car["location"],
         car["image_url"],
         car["ad_url"],
-        car["created_at"]
+        car["created_at"],
+        car["price_uah"],
     ))
     conn.commit()
+    conn.close()
 
-# ===================== UTILS =====================
 
-def random_sleep():
-    sec = int(random.uniform(CHECK_MIN, CHECK_MAX) * 60)
-    print(f"\n⏳ Sleeping {sec//60} min {sec%60} sec...\n")
-    time.sleep(sec)
+# =============================
+# HELPERS
+# =============================
+def normalize(text: str) -> str:
+    return (text or "").lower()
 
-def extract_location(o):
-    loc = o.get("location")
-    if isinstance(loc, dict):
-        city = loc.get("city")
-        if isinstance(city, dict):
-            return city.get("name")
-        if isinstance(city, str):
-            return city
-    return None
 
-def is_allowed_location(location: str | None) -> bool:
-    if not location:
-        return False
-    l = location.lower()
-    return any(k in l for k in ALLOWED_LOCATIONS)
+def location_ok(location: str) -> bool:
+    loc = normalize(location)
+    return any(k in loc for k in KYIV_KEYWORDS)
 
-def extract_price(o):
-    for p in o.get("params") or []:
-        if p.get("key") == "price":
-            v = p.get("value") or {}
-            value = v.get("value")
-            currency = v.get("currency")
 
-            if not value or not currency:
-                return None
+def price_to_uah(price: dict) -> int | None:
+    if not price:
+        return None
+    if price.get("currency") != "UAH":
+        return None
+    return price.get("value")
 
-            if currency == "USD":
-                price_uah = int(value * USD_TO_UAH)
-            elif currency == "UAH":
-                price_uah = int(value)
-            else:
-                return None
 
-            return int(value), currency, price_uah
+def is_car(offer: dict) -> bool:
+    cat = offer.get("category") or {}
+    slug = cat.get("slug", "")
+    parent = cat.get("parent", "")
+    return slug == "transport" or parent == "transport"
 
-    return None
 
-# ===================== API =====================
+# =============================
+# MAIN
+# =============================
+def fetch_page(offset: int):
+    params = {
+        "offset": offset,
+        "limit": 50,
+    }
+    return requests.get(API_URL, headers=HEADERS, params=params, timeout=15)
 
-def fetch_from_api(session):
-    results = []
 
-    for offset in OFFSETS:
-        params = BASE_PARAMS | {"offset": offset}
-        r = session.get(API_URL, headers=HEADERS, params=params, timeout=30)
+def main():
+    init_db()
+    print("🚀 OLX API monitor started (Kyiv / Kyiv region)\n")
 
+    matched = 0
+    filtered_price = 0
+    filtered_location = 0
+    filtered_category = 0
+
+    for offset in (0, 50, 100):
+        r = fetch_page(offset)
         print(f"HTTP {r.status_code} | offset={offset}")
+
         if r.status_code != 200:
+            print("❌ API rejected request:", r.text[:150])
             continue
 
         offers = r.json().get("data", [])
         print(f"ℹ Offers at offset {offset}: {len(offers)}")
 
         for o in offers:
-            price = extract_price(o)
-            if not price:
+            if not is_car(o):
+                filtered_category += 1
                 continue
 
-            price_value, price_currency, price_uah = price
-
-            # --- PRICE FILTER (<= 2000$) ---
-            if price_currency == "USD" and price_value > MAX_PRICE_USD:
-                continue
-            if price_currency == "UAH" and price_uah > MAX_PRICE_USD * USD_TO_UAH:
+            price_uah = price_to_uah(o.get("price"))
+            if not price_uah or not (MIN_PRICE_UAH <= price_uah <= MAX_PRICE_UAH):
+                filtered_price += 1
                 continue
 
-            location = extract_location(o)
-
-            # --- LOCATION FILTER ---
-            if not is_allowed_location(location):
+            location = o.get("location", {}).get("label", "")
+            if not location_ok(location):
+                filtered_location += 1
                 continue
 
-            ad_url = o.get("url")
-            if ad_url and ad_url.startswith("/"):
-                ad_url = "https://www.olx.ua" + ad_url
-
-            image_url = None
-            photos = o.get("photos")
+            photos = o.get("photos") or []
+            image_url = ""
             if photos:
-                image_url = photos[0].get("link")
+                image_url = photos[0]["link"].replace("{width}", "640").replace("{height}", "480")
 
-            results.append({
-                "id": str(o.get("id")),
+            car = {
+                "id": o["id"],
                 "title": o.get("title"),
-                "price_value": price_value,
-                "price_currency": price_currency,
-                "price_uah": price_uah,
+                "price_value": o.get("price", {}).get("value"),
+                "price_currency": o.get("price", {}).get("currency"),
                 "location": location,
                 "image_url": image_url,
-                "ad_url": ad_url,
-                "created_at": datetime.now(timezone.utc).isoformat()
-            })
+                "ad_url": o.get("url"),
+                "created_at": datetime.utcnow().isoformat(),
+                "price_uah": price_uah,
+            }
 
-    print(f"✅ Total matched cars: {len(results)}")
-    return results
+            save_car(car)
+            matched += 1
 
-# ===================== MAIN =====================
+    print(f"\n✅ Total matched cars: {matched}")
+    print(f"❌ Filtered by category: {filtered_category}")
+    print(f"❌ Filtered by price: {filtered_price}")
+    print(f"❌ Filtered by location: {filtered_location}")
 
-def main():
-    print("🚀 OLX API monitor started (Kyiv / Kyiv region)\n")
+    sleep_time = random.randint(SLEEP_MIN, SLEEP_MAX)
+    print(f"\n⏳ Sleeping {sleep_time // 60} min {sleep_time % 60} sec...\n")
+    time.sleep(sleep_time)
 
-    conn = init_db()
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    try:
-        while True:
-            print("🔍 Checking OLX API...")
-            cars = fetch_from_api(session)
-
-            for car in cars:
-                save_car(conn, car)
-                print(
-                    f"🚗 {car['title']} | "
-                    f"{car['price_value']} {car['price_currency']} "
-                    f"(~{car['price_uah']} грн) | {car['location']}"
-                )
-                print(car["ad_url"])
-                print("-" * 70)
-
-            random_sleep()
-
-    except KeyboardInterrupt:
-        print("\n🛑 Stopped by user")
-    finally:
-        conn.close()
-
-# ===================== START =====================
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user")
+            break
+        except Exception as e:
+            print("⚠ ERROR:", e)
+            time.sleep(30)
