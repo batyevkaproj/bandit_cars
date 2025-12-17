@@ -13,6 +13,8 @@ DB_PATH = BASE_DIR / "cars.db"
 
 API_URL = "https://www.olx.ua/api/v1/offers"
 
+CATEGORY_CARS_ID = 15  # 🚗 Легкові автомобілі
+
 SLEEP_MIN = 8 * 60
 SLEEP_MAX = 12 * 60
 
@@ -50,10 +52,10 @@ def init_db():
     """)
 
     cur.execute("PRAGMA table_info(cars)")
-    existing = {row[1] for row in cur.fetchall()}
+    existing_cols = {row[1] for row in cur.fetchall()}
 
     for col, col_type in REQUIRED_COLUMNS.items():
-        if col not in existing:
+        if col not in existing_cols:
             print(f"🛠 DB migration: adding column '{col}'")
             cur.execute(f"ALTER TABLE cars ADD COLUMN {col} {col_type}")
 
@@ -87,14 +89,14 @@ def save_car(car: dict):
 
 
 # =============================
-# PRICE LOGIC (IMPORTANT)
+# PRICE LOGIC
 # =============================
 def extract_prices(price: dict):
     """
     Повертає:
-    - price_value      (оригінал з OLX, напр. 3400)
-    - price_currency   (USD / UAH / EUR / None)
-    - price_uah        (int або None, ТІЛЬКИ якщо реально відомо)
+    - price_value (оригінал)
+    - price_currency (USD / UAH / EUR)
+    - price_uah (int або None, якщо невідомо)
     """
     if not price:
         return None, None, None
@@ -106,19 +108,15 @@ def extract_prices(price: dict):
     price_uah = None
 
     if converted:
-        # OLX уже порахував у гривні
         price_uah = int(converted)
     elif currency == "UAH" and value:
         price_uah = int(value)
-    else:
-        # USD / EUR без converted_value — НЕ знаємо грн
-        price_uah = None
 
     return value, currency, price_uah
 
 
 # =============================
-# MAIN
+# API
 # =============================
 def fetch_page(offset: int):
     return requests.get(
@@ -127,14 +125,18 @@ def fetch_page(offset: int):
         params={
             "offset": offset,
             "limit": 50,
+            "category_id": CATEGORY_CARS_ID,  # 🚗 cars only
         },
         timeout=15
     )
 
 
+# =============================
+# MAIN
+# =============================
 def main():
     init_db()
-    print("🚀 OLX API monitor started (RAW COLLECT MODE)\n")
+    print("🚀 OLX car monitor started (CARS ONLY)\n")
 
     saved = 0
     skipped_no_photo = 0
@@ -151,6 +153,10 @@ def main():
         print(f"ℹ Offers at offset {offset}: {len(offers)}")
 
         for o in offers:
+            # safety: іноді OLX все одно може прислати не авто
+            if o.get("category_id") != CATEGORY_CARS_ID:
+                continue
+
             photos = o.get("photos") or []
             if not photos:
                 skipped_no_photo += 1
