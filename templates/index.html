@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OLX Monitor Gallery</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+        }
+
+        /* --- FILTER BAR STYLES --- */
+        .filter-bar {
+            background-color: #1e1e1e;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 25px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .filter-group label {
+            font-size: 0.8rem;
+            margin-bottom: 4px;
+            color: #888;
+        }
+
+        input {
+            background-color: #2c2c2c;
+            border: 1px solid #444;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: #00ff9d;
+        }
+
+        button {
+            background-color: #00ff9d;
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 14px; /* Align with inputs */
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background-color: #00cc7d;
+        }
+
+        .reset-btn {
+            background-color: #444;
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            margin-top: 14px;
+            display: inline-block;
+        }
+
+        .reset-btn:hover {
+            background-color: #666;
+        }
+
+        /* --- GALLERY STYLES --- */
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #222;
+            aspect-ratio: 4/3;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            transition: transform 0.2s, border-color 0.2s;
+            border: 1px solid #333;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            border-color: #00ff9d;
+        }
+
+        .card a {
+            display: block;
+            width: 100%;
+            height: 100%;
+            text-decoration: none;
+        }
+
+        .card img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .price-tag {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: #00ff9d;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 1.1rem;
+            backdrop-filter: blur(4px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+        }
+
+        .date-tag {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.6);
+            color: #ccc;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+        }
+
+        .no-results {
+            text-align: center;
+            width: 100%;
+            grid-column: 1 / -1;
+            padding: 50px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- FILTER FORM -->
+    <form class="filter-bar" action="/" method="get">
+        <div class="filter-group">
+            <label>Ціна від (грн)</label>
+            <input type="number" name="min_price" placeholder="0" value="{{ min_price or '' }}">
+        </div>
+        <div class="filter-group">
+            <label>Ціна до (грн)</label>
+            <input type="number" name="max_price" placeholder="Max" value="{{ max_price or '' }}">
+        </div>
+        <div class="filter-group">
+            <label>Дата з</label>
+            <input type="date" name="start_date" value="{{ start_date or '' }}">
+        </div>
+        <div class="filter-group">
+            <label>Дата по</label>
+            <input type="date" name="end_date" value="{{ end_date or '' }}">
+        </div>
+        
+        <button type="submit">Застосувати</button>
+        <a href="/" class="reset-btn">Скинути</a>
+    </form>
+
+    <!-- GALLERY -->
+    <div class="gallery">
+        {% if cars %}
+            {% for car in cars %}
+            <div class="card">
+                <a href="{{ car.ad_url }}" target="_blank" title="{{ car.title }}">
+                    <!-- Date Badge -->
+                    <div class="date-tag">{{ car.created_at[:10] }} {{ car.created_at[11:16] }}</div>
+                    
+                    <img src="{{ car.image_url }}" loading="lazy" alt="Car">
+                    
+                    <!-- Price Badge -->
+                    <div class="price-tag">
+                        {% if car.price_uah %}
+                            {{ "{:,}".format(car.price_uah).replace(',', ' ') }} ₴
+                        {% else %}
+                            Договірна
+                        {% endif %}
+                    </div>
+                </a>
+            </div>
+            {% endfor %}
+        {% else %}
+            <div class="no-results">
+                <h2>Ничего не найдено 🕵️‍♂️</h2>
+                <p>Попробуйте изменить фильтры</p>
+            </div>
+        {% endif %}
+    </div>
+
+</body>
+</html>
