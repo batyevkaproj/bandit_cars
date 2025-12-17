@@ -3,6 +3,8 @@ import time
 import requests
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+import random
+
 
 # =============================
 # ⚙️ КОНФИГУРАЦИЯ
@@ -119,13 +121,27 @@ def fetch_page(offset: int):
         "offset": offset,
         "limit": 50,
         "category_id": CATEGORY_CARS_ID,
-        "sort_by": SEARCH_CONFIG["sort_by"]
+        # "sort_by": SEARCH_CONFIG["sort_by"]  <-- ЗАКОММЕНТИРОВАЛИ ЭТО (частая причина ошибки 500)
     }
-    if SEARCH_CONFIG["q"]: params["q"] = SEARCH_CONFIG["q"]
-    if SEARCH_CONFIG["filter_float_price:from"]: params["filter_float_price:from"] = SEARCH_CONFIG["filter_float_price:from"]
-    if SEARCH_CONFIG["filter_float_price:to"]: params["filter_float_price:to"] = SEARCH_CONFIG["filter_float_price:to"]
+    
+    # Добавляем фильтры только если они есть
+    if SEARCH_CONFIG["q"]: 
+        params["q"] = SEARCH_CONFIG["q"]
+        
+    if SEARCH_CONFIG["filter_float_price:from"]: 
+        params["filter_float_price:from"] = SEARCH_CONFIG["filter_float_price:from"]
+        
+    if SEARCH_CONFIG["filter_float_price:to"]: 
+        params["filter_float_price:to"] = SEARCH_CONFIG["filter_float_price:to"]
 
-    return requests.get(API_URL, headers=HEADERS, params=params, timeout=15)
+    # Обновленный заголовок, чтобы меньше походить на бота
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.olx.ua/",
+    }
+
+    return requests.get(API_URL, headers=headers, params=params, timeout=15)
 
 # =============================
 # 🚀 ОСНОВНОЙ ЦИКЛ
