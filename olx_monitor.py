@@ -2,7 +2,7 @@ import sqlite3
 import time
 import requests
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # =============================
 # ⚙️ КОНФИГУРАЦИЯ
@@ -10,10 +10,9 @@ from datetime import datetime, timezone
 BASE_DIR = Path(__file__).parent.resolve()
 DB_PATH = BASE_DIR / "cars.db"
 API_URL = "https://www.olx.ua/api/v1/offers"
-CATEGORY_CARS_ID = 1532  # ID категории "Легковые автомобили"
+CATEGORY_CARS_ID = 1532
 
-# 🛑 СТОП-СЛОВА (Фильтр мусора)
-# Если эти слова есть в заголовке, объявление пропускается.
+# 🛑 СТОП-СЛОВА
 STOP_WORDS = [
     "трактор", "мотоблок", "причіп", "прицеп", "скутер", 
     "мотоцикл", "квадроцикл", "навантажувач", "погрузчик", 
@@ -22,12 +21,17 @@ STOP_WORDS = [
     "scooter", "moto", "atv", "tractor", "разборка"
 ]
 
-# 🔍 НАСТРОЙКИ ПОИСКА
+# 🔍 НАСТРОЙКИ ПОИСКА И ФИЛЬТРОВ
 SEARCH_CONFIG = {
-    "q": "",                          # Поисковый запрос (например, "BMW"). Оставьте "", чтобы искать всё.
-    "filter_float_price:from": 20000, # Минимальная цена (отсекает игрушки и мелкие запчасти)
-    "filter_float_price:to": None,    # Максимальная цена (None = без ограничений)
-    "sort_by": "created_at:desc"      # Сортировка: сначала новые
+    "q": "",                          
+    "filter_float_price:from": 20000, 
+    "filter_float_price:to": None,    
+    "sort_by": "created_at:desc",
+    
+    # 🔥 НОВИЙ ФІЛЬТР: Не зберігати оголошення, старіші за цю дату
+    # Формат: "РРРР-ММ-ДД" (наприклад, "2023-01-01")
+    # Якщо None - зберігаємо все.
+    "filter_date_from": "2025-12-01" 
 }
 
 HEADERS = {
@@ -40,7 +44,6 @@ HEADERS = {
 # 🗄️ РАБОТА С БАЗОЙ ДАННЫХ
 # =============================
 def init_db():
-    """Создает таблицу, если она не существует."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -61,19 +64,11 @@ def init_db():
     conn.close()
 
 def save_car_and_verify(car: dict) -> bool:
-    """
-    1. Записывает машину в БД.
-    2. Сразу читает её обратно (DUMP).
-    3. Сравнивает оригинал и запись (CHECK).
-    Возвращает True, если это новая запись.
-    """
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Позволяет обращаться к полям по имени
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    
     start_changes = conn.total_changes
 
-    # 1. ЗАПИСЬ (WRITE)
     cur.execute("""
         INSERT OR IGNORE INTO cars (
             id, title, price_value, price_currency, price_uah, 
@@ -89,25 +84,14 @@ def save_car_and_verify(car: dict) -> bool:
     was_inserted = (conn.total_changes > start_changes)
     
     if was_inserted:
-        # 2. ЧТЕНИЕ С ДИСКА (DUMP)
         cur.execute("SELECT * FROM cars WHERE id = ?", (car['id'],))
         row = cur.fetchone()
-        
         if row:
             db_record = dict(row)
-            
-            # ВЫВОД ДАМПА
-            print(f"\n💾 [DATA DUMP] Записано на диск:")
-            print(f"   ID:    {db_record['id']}")
-            print(f"   Title: {db_record['title']}")
-            print(f"   Price: {db_record['price_uah']} UAH")
-            
-            # 3. ПРОВЕРКА ЦЕЛОСТНОСТИ (CHECK)
-            # Сравниваем то, что в памяти, с тем, что в базе
-            if db_record['title'] == car['title']:
-                print(f"   ✅ [WRITE CHECK] PASSED: Данные верифицированы.")
-            else:
-                print(f"   ❌ [WRITE CHECK] FAILED: Ошибка записи! Данные не совпадают.")
+            # Виводимо реальну дату створення оголошення
+            print(f"\n💾 [SAVED] ID: {db_record['id']}")
+            print(f"   📅 Date:  {db_record['created_at']}") 
+            print(f"   💰 Price: {db_record['price_uah']} UAH")
             print("-" * 50)
 
     conn.close()
@@ -117,41 +101,29 @@ def save_car_and_verify(car: dict) -> bool:
 # 🛠️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =============================
 def extract_prices(offer_data: dict):
-    """Извлекает цену из разных полей API."""
     price = offer_data.get("price")
-    
-    # Иногда цена спрятана в параметрах
     if not price and "params" in offer_data:
         for param in offer_data["params"]:
             if param.get("key") == "price":
                 price = param.get("value")
                 break
-
-    if not price: 
-        return None, None, None
-
+    if not price: return None, None, None
     value = price.get("value")
     currency = price.get("currency")
     converted = price.get("converted_value")
-
     price_uah = int(converted) if converted else (int(value) if currency == "UAH" and value else None)
     return value, currency, price_uah
 
 def fetch_page(offset: int):
-    """Делает запрос к API с учетом фильтров."""
     params = {
         "offset": offset,
         "limit": 50,
         "category_id": CATEGORY_CARS_ID,
         "sort_by": SEARCH_CONFIG["sort_by"]
     }
-    
-    if SEARCH_CONFIG["q"]:
-        params["q"] = SEARCH_CONFIG["q"]
-    if SEARCH_CONFIG["filter_float_price:from"]:
-        params["filter_float_price:from"] = SEARCH_CONFIG["filter_float_price:from"]
-    if SEARCH_CONFIG["filter_float_price:to"]:
-        params["filter_float_price:to"] = SEARCH_CONFIG["filter_float_price:to"]
+    if SEARCH_CONFIG["q"]: params["q"] = SEARCH_CONFIG["q"]
+    if SEARCH_CONFIG["filter_float_price:from"]: params["filter_float_price:from"] = SEARCH_CONFIG["filter_float_price:from"]
+    if SEARCH_CONFIG["filter_float_price:to"]: params["filter_float_price:to"] = SEARCH_CONFIG["filter_float_price:to"]
 
     return requests.get(API_URL, headers=HEADERS, params=params, timeout=15)
 
@@ -162,13 +134,16 @@ def main():
     init_db()
     print(f"🚀 OLX Monitor запущен.")
     print(f"📂 База данных: {DB_PATH}")
-    print(f"🛑 Стоп-слова: {len(STOP_WORDS)} шт.")
+    
+    min_date = SEARCH_CONFIG.get("filter_date_from")
+    if min_date:
+        print(f"📅 Фільтр дати: зберігаємо тільки новіші за {min_date}")
+    
     print("-" * 50)
 
     while True:
         new_cars_count = 0
         
-        # Проверяем первые 3 страницы (0, 50, 100)
         for offset in (0, 50, 100):
             try:
                 r = fetch_page(offset)
@@ -179,17 +154,30 @@ def main():
                 offers = r.json().get("data", [])
                 
                 for o in offers:
-                    # 1. Проверка стоп-слов
+                    # 1. Стоп-слова
                     title = o.get("title", "").lower()
-                    if any(word in title for word in STOP_WORDS):
-                        continue
+                    if any(word in title for word in STOP_WORDS): continue
 
-                    # 2. Проверка наличия фото
+                    # 2. Фото
                     photos = o.get("photos") or []
-                    if not photos: 
-                        continue
+                    if not photos: continue
 
-                    # 3. Подготовка данных
+                    # 3. 🔥 ОТРИМАННЯ РЕАЛЬНОЇ ДАТИ
+                    # API повертає created_time (напр. "2023-12-17T14:30:00+02:00")
+                    real_date_str = o.get("created_time") or o.get("last_refresh_time")
+                    
+                    if not real_date_str:
+                        # Якщо дати немає, беремо поточну
+                        real_date_str = datetime.now(timezone.utc).isoformat()
+
+                    # 4. 🔥 ФІЛЬТР ПО ДАТІ (В СКРИПТІ)
+                    if min_date:
+                        # Порівнюємо рядки (ISO формат дозволяє це робити коректно)
+                        # Беремо перші 10 символів (YYYY-MM-DD)
+                        if real_date_str[:10] < min_date:
+                            # print(f"⏭ Пропуск: старе оголошення від {real_date_str[:10]}")
+                            continue
+
                     p_val, p_curr, p_uah = extract_prices(o)
 
                     car = {
@@ -202,10 +190,9 @@ def main():
                         "location_raw": str(o.get("location")),
                         "image_url": photos[0]["link"].replace("{width}", "640").replace("{height}", "480"),
                         "ad_url": o.get("url"),
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": real_date_str, # Зберігаємо реальну дату
                     }
 
-                    # 4. Сохранение + Dump + Check
                     if save_car_and_verify(car):
                         new_cars_count += 1
                         print(f"🟢 [NEW] {car['title']}")
@@ -213,17 +200,17 @@ def main():
                         print("=" * 50)
 
             except Exception as e:
-                print(f"❌ Ошибка при обработке страницы {offset}: {e}")
+                print(f"❌ Ошибка: {e}")
 
         if new_cars_count == 0:
-            print(f"💤 Новых авто нет. Жду 10 минут... (Время: {datetime.now().strftime('%H:%M:%S')})")
+            print(f"💤 Нових авто немає. Чекаю 10 хвилин...")
         else:
-            print(f"✅ Цикл завершен. Добавлено новых авто: {new_cars_count}")
+            print(f"✅ Додано {new_cars_count} нових авто.")
 
-        time.sleep(300) # Пауза 10 минут
+        time.sleep(600)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n🛑 Работа остановлена пользователем.")
+        print("\n🛑 Зупинено.")
