@@ -162,6 +162,10 @@ def main():
         
         for offset in (0, 50, 100):
             try:
+                sleep_time = random.uniform(3, 7)
+                print(f"⏳ Чекаю {sleep_time:.1f} сек перед запитом...")
+                time.sleep(sleep_time)
+
                 r = fetch_page(offset)
                 if r.status_code != 200:
                     print(f"⚠️ Ошибка API: {r.status_code}")
@@ -223,7 +227,9 @@ def main():
         else:
             print(f"✅ Додано {new_cars_count} нових авто.")
 
-        time.sleep(600)
+        wait_time = random.randint(600, 900)
+        print(f"💤 Сплю {wait_time} секунд...")
+        time.sleep(wait_time)
 
 if __name__ == "__main__":
     try:
