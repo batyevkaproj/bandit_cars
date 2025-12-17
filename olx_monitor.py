@@ -11,7 +11,16 @@ API_URL = "https://www.olx.ua/api/v1/offers/"
 CATEGORY_ID = 108
 
 MAX_PRICE_USD = 2000
-USD_TO_UAH = 40  # грубий фільтр
+USD_TO_UAH = 40  # грубий курс для фільтра
+
+# --- GEO FILTER ---
+ALLOWED_LOCATIONS = (
+    "київ",
+    "kyiv",
+    "київська",
+    "киев",
+    "kiev"
+)
 
 CHECK_MIN = 8
 CHECK_MAX = 12
@@ -38,13 +47,13 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
 
-    # базова таблиця
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cars (
             id TEXT PRIMARY KEY,
             title TEXT,
             price_value INTEGER,
             price_currency TEXT,
+            price_uah INTEGER,
             location TEXT,
             image_url TEXT,
             ad_url TEXT,
@@ -52,7 +61,7 @@ def init_db():
         )
     """)
 
-    # ---- АВТО-МІГРАЦІЯ ----
+    # --- auto migration ---
     cols = [r[1] for r in cur.execute("PRAGMA table_info(cars)").fetchall()]
     if "price_uah" not in cols:
         print("🛠 DB migration: adding column price_uah")
@@ -98,6 +107,12 @@ def extract_location(o):
             return city
     return None
 
+def is_allowed_location(location: str | None) -> bool:
+    if not location:
+        return False
+    l = location.lower()
+    return any(k in l for k in ALLOWED_LOCATIONS)
+
 def extract_price(o):
     for p in o.get("params") or []:
         if p.get("key") == "price":
@@ -142,10 +157,16 @@ def fetch_from_api(session):
 
             price_value, price_currency, price_uah = price
 
-            # 🔥 ФІЛЬТР ≤ 2000$
+            # --- PRICE FILTER (<= 2000$) ---
             if price_currency == "USD" and price_value > MAX_PRICE_USD:
                 continue
             if price_currency == "UAH" and price_uah > MAX_PRICE_USD * USD_TO_UAH:
+                continue
+
+            location = extract_location(o)
+
+            # --- LOCATION FILTER ---
+            if not is_allowed_location(location):
                 continue
 
             ad_url = o.get("url")
@@ -163,7 +184,7 @@ def fetch_from_api(session):
                 "price_value": price_value,
                 "price_currency": price_currency,
                 "price_uah": price_uah,
-                "location": extract_location(o),
+                "location": location,
                 "image_url": image_url,
                 "ad_url": ad_url,
                 "created_at": datetime.now(timezone.utc).isoformat()
@@ -175,7 +196,7 @@ def fetch_from_api(session):
 # ===================== MAIN =====================
 
 def main():
-    print("🚀 OLX API monitor started\n")
+    print("🚀 OLX API monitor started (Kyiv / Kyiv region)\n")
 
     conn = init_db()
     session = requests.Session()
