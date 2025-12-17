@@ -3,7 +3,7 @@ import sqlite3
 import time
 import random
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
 
 # =============================
 # CONFIG
@@ -13,17 +13,8 @@ DB_PATH = BASE_DIR / "cars.db"
 
 API_URL = "https://www.olx.ua/api/v1/offers"
 
-MIN_PRICE_UAH = 2000
-MAX_PRICE_UAH = 300000
-
 SLEEP_MIN = 8 * 60
 SLEEP_MAX = 12 * 60
-
-KYIV_KEYWORDS = [
-    "київ", "киев", "kyiv",
-    "київська", "киевская",
-    "область", "обл"
-]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -32,24 +23,40 @@ HEADERS = {
 }
 
 # =============================
-# DB
+# DB / MIGRATIONS
 # =============================
+REQUIRED_COLUMNS = {
+    "id": "TEXT PRIMARY KEY",
+    "title": "TEXT",
+    "price_value": "INTEGER",
+    "price_currency": "TEXT",
+    "price_uah": "INTEGER",
+    "price_raw": "TEXT",
+    "location_raw": "TEXT",
+    "image_url": "TEXT",
+    "ad_url": "TEXT",
+    "created_at": "TEXT",
+}
+
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS cars (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            price_value INTEGER,
-            price_currency TEXT,
-            location TEXT,
-            image_url TEXT,
-            ad_url TEXT,
-            created_at TEXT,
-            price_uah INTEGER
+            id TEXT PRIMARY KEY
         )
     """)
+
+    cur.execute("PRAGMA table_info(cars)")
+    existing = {row[1] for row in cur.fetchall()}
+
+    for col, col_type in REQUIRED_COLUMNS.items():
+        if col not in existing:
+            print(f"🛠 DB migration: adding column '{col}'")
+            cur.execute(f"ALTER TABLE cars ADD COLUMN {col} {col_type}")
+
     conn.commit()
     conn.close()
 
@@ -59,122 +66,118 @@ def save_car(car: dict):
     cur = conn.cursor()
     cur.execute("""
         INSERT OR IGNORE INTO cars (
-            id, title, price_value, price_currency,
-            location, image_url, ad_url,
-            created_at, price_uah
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, title,
+            price_value, price_currency, price_uah, price_raw,
+            location_raw, image_url, ad_url, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         car["id"],
         car["title"],
         car["price_value"],
         car["price_currency"],
-        car["location"],
+        car["price_uah"],
+        car["price_raw"],
+        car["location_raw"],
         car["image_url"],
         car["ad_url"],
         car["created_at"],
-        car["price_uah"],
     ))
     conn.commit()
     conn.close()
 
 
 # =============================
-# HELPERS
+# PRICE LOGIC (IMPORTANT)
 # =============================
-def normalize(text: str) -> str:
-    return (text or "").lower()
-
-
-def location_ok(location: str) -> bool:
-    loc = normalize(location)
-    return any(k in loc for k in KYIV_KEYWORDS)
-
-
-def price_to_uah(price: dict) -> int | None:
+def extract_prices(price: dict):
+    """
+    Повертає:
+    - price_value      (оригінал з OLX, напр. 3400)
+    - price_currency   (USD / UAH / EUR / None)
+    - price_uah        (int або None, ТІЛЬКИ якщо реально відомо)
+    """
     if not price:
-        return None
-    if price.get("currency") != "UAH":
-        return None
-    return price.get("value")
+        return None, None, None
 
+    value = price.get("value")
+    currency = price.get("currency")
+    converted = price.get("converted_value")
 
-def is_car(offer: dict) -> bool:
-    cat = offer.get("category") or {}
-    slug = cat.get("slug", "")
-    parent = cat.get("parent", "")
-    return slug == "transport" or parent == "transport"
+    price_uah = None
+
+    if converted:
+        # OLX уже порахував у гривні
+        price_uah = int(converted)
+    elif currency == "UAH" and value:
+        price_uah = int(value)
+    else:
+        # USD / EUR без converted_value — НЕ знаємо грн
+        price_uah = None
+
+    return value, currency, price_uah
 
 
 # =============================
 # MAIN
 # =============================
 def fetch_page(offset: int):
-    params = {
-        "offset": offset,
-        "limit": 50,
-    }
-    return requests.get(API_URL, headers=HEADERS, params=params, timeout=15)
+    return requests.get(
+        API_URL,
+        headers=HEADERS,
+        params={
+            "offset": offset,
+            "limit": 50,
+        },
+        timeout=15
+    )
 
 
 def main():
     init_db()
-    print("🚀 OLX API monitor started (Kyiv / Kyiv region)\n")
+    print("🚀 OLX API monitor started (RAW COLLECT MODE)\n")
 
-    matched = 0
-    filtered_price = 0
-    filtered_location = 0
-    filtered_category = 0
+    saved = 0
+    skipped_no_photo = 0
 
     for offset in (0, 50, 100):
         r = fetch_page(offset)
         print(f"HTTP {r.status_code} | offset={offset}")
 
         if r.status_code != 200:
-            print("❌ API rejected request:", r.text[:150])
+            print("❌ API rejected:", r.text[:120])
             continue
 
         offers = r.json().get("data", [])
         print(f"ℹ Offers at offset {offset}: {len(offers)}")
 
         for o in offers:
-            if not is_car(o):
-                filtered_category += 1
-                continue
-
-            price_uah = price_to_uah(o.get("price"))
-            if not price_uah or not (MIN_PRICE_UAH <= price_uah <= MAX_PRICE_UAH):
-                filtered_price += 1
-                continue
-
-            location = o.get("location", {}).get("label", "")
-            if not location_ok(location):
-                filtered_location += 1
-                continue
-
             photos = o.get("photos") or []
-            image_url = ""
-            if photos:
-                image_url = photos[0]["link"].replace("{width}", "640").replace("{height}", "480")
+            if not photos:
+                skipped_no_photo += 1
+                continue
+
+            price_value, price_currency, price_uah = extract_prices(o.get("price"))
 
             car = {
                 "id": o["id"],
                 "title": o.get("title"),
-                "price_value": o.get("price", {}).get("value"),
-                "price_currency": o.get("price", {}).get("currency"),
-                "location": location,
-                "image_url": image_url,
-                "ad_url": o.get("url"),
-                "created_at": datetime.utcnow().isoformat(),
+                "price_value": price_value,
+                "price_currency": price_currency,
                 "price_uah": price_uah,
+                "price_raw": str(o.get("price")),
+                "location_raw": str(o.get("location")),
+                "image_url": photos[0]["link"]
+                    .replace("{width}", "640")
+                    .replace("{height}", "480"),
+                "ad_url": o.get("url"),
+                "created_at": datetime.now(UTC).isoformat(),
             }
 
             save_car(car)
-            matched += 1
+            saved += 1
 
-    print(f"\n✅ Total matched cars: {matched}")
-    print(f"❌ Filtered by category: {filtered_category}")
-    print(f"❌ Filtered by price: {filtered_price}")
-    print(f"❌ Filtered by location: {filtered_location}")
+    print(f"\n✅ Total saved cars: {saved}")
+    print(f"❌ Skipped without photo: {skipped_no_photo}")
 
     sleep_time = random.randint(SLEEP_MIN, SLEEP_MAX)
     print(f"\n⏳ Sleeping {sleep_time // 60} min {sleep_time % 60} sec...\n")
