@@ -220,7 +220,7 @@ def main():
         else:
             print(f"✅ Цикл завершен. Добавлено новых авто: {new_cars_count}")
 
-        time.sleep(300) # Пауза 10 минут
+        time.sleep(600) # Пауза 10 минут
 
 if __name__ == "__main__":
     try:
